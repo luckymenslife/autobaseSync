@@ -16,6 +16,11 @@ type AutomapInstance struct{
 	ac AutomapConf
 	at AutomapToken
 }
+
+type DatabaseInstance struct{
+	dbconn string
+}
+
 type AutobaseOrg struct{
 	Gid int
 	Name string
@@ -43,20 +48,35 @@ type AutomapToken struct{
 	Ttl string
 	updateTime time.Time
 }
-
+var dbInst DatabaseInstance
+var db *sql.DB
 func main(){
 	dbhost := "gbu.asuds77.ru"
 	dbport := "5432"
 	dbname := "inf_asuds_copy"
 	dbuser := "ilgiz"
 	dbpass := "ctrhtnysq!rjl"
-
 	dbconn := fmt.Sprintf("host=%s port=%s dbname=%s user=%s password=%s sslmode=disable",dbhost,dbport,dbname,dbuser,dbpass)
-	//fmt.Println(dbconn)
-	db,err := sql.Open("postgres",dbconn)
-	defer db.Close()
 
-	fmt.Println("# Querying")
+	dbInst = DatabaseInstance{dbconn}
+	var err error
+	db,err = dbInst.connect()
+	fmt.Println(dbInst)
+	defer dbInst.close(db)
+	lastID,err:= dbInst.getLastId(db)
+	checkErr(err)
+	var SLEEP int = 10000
+	for true{
+		curID, err := dbInst.getSeqVal(db)
+		checkErr(err)
+		if curID <= lastID {
+			time.Sleep(time.Duration(SLEEP)*time.Millisecond)
+		} else {
+			err = dbInst.processTable(db,&lastID)
+		}
+
+	}
+	/*fmt.Println("# Querying")
 	rows, err := db.Query("SELECT id,object_type, change_type, change_date, data FROM changes")
 	checkErr(err)
 
@@ -88,7 +108,7 @@ func main(){
 			AutomapToken{"","","",time.Now()}}
 
 	token,err := automapInst.getToken(false)
-	fmt.Println(token)
+	fmt.Println(token)*/
 
 
 }
@@ -98,6 +118,66 @@ func checkErr(err error){
 		panic(err)
 	}
 }
+
+func (di DatabaseInstance) connect() (*sql.DB,error) {
+	var err error
+	db,err = sql.Open("postgres",di.dbconn)
+	checkErr(err)
+	return db,err
+}
+
+func (di DatabaseInstance) close(db *sql.DB) error {
+	var err error
+	err = db.Close()
+	return err
+}
+
+/*
+Из БД при запуске должен браться id первой строки со статусом 0 (new).
+Если таких строк нет, то в качестве lastid забирается текущее значение
+последовательности public.changes_id_seq
+ */
+func (di DatabaseInstance) getSeqVal(db *sql.DB) (int, error) {
+	rows, err := db.Query("SELECT last_value+1 from public.changes_id_seq")
+	checkErr(err)
+	var id int = -1
+	for rows.Next() {
+		err = rows.Scan(&id)
+		checkErr(err)
+	}
+	return id,err
+}
+func (di DatabaseInstance) getLastId(db *sql.DB) (int, error) {
+	rows, err := db.Query("SELECT min(id) from public.changes where status = 0")
+	checkErr(err)
+	var id int = -1
+	for rows.Next() {
+		err = rows.Scan(&id)
+		checkErr(err)
+	}
+	if id == -1 {
+		id,err = di.getSeqVal(db)
+	}
+	return id,err
+}
+
+func (di DatabaseInstance) processTable(db *sql.DB,lastID *int) (error) {
+	rows, err := db.Query("SELECT id, object_type, change_type, data from public.changes where status = 0 and id >= ? order by id limit 10",strconv.Itoa(*lastID))
+	checkErr(err)
+	for rows.Next() {
+		var id int
+		var objectType string
+		var changeType string
+		var data string
+
+		err = rows.Scan(&id,&objectType,&changeType,&data)
+		checkErr(err)
+		*lastID = id
+		fmt.Println(data)
+	}
+	return err
+}
+
 /*
 Выполнения POST-запроса. req - URI запроса, reqObj - структура (объект), передаваемая серверу при запросе.
 respObj - структура ответа сервера. useToken - флаг, указывающий, прикреплять ли к URI параметр с токеном.
